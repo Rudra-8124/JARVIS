@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>J.A.R.V.I.S. HUD Interface</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Orbitron:wght@400;500;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Starfield Background -->
+    <div class="stars"></div>
+    <div class="grid-overlay"></div>
+
+    <!-- Main Container -->
+    <div class="hud-container">
+        <!-- Top Navigation / Telemetry -->
+        <header class="hud-header">
+            <div class="header-left">
+                <div class="system-status">
+                    <span class="status-indicator connected" id="connection-dot"></span>
+                    <span class="status-label" id="connection-label font-tech">SYS_CONN: ONLINE</span>
+                </div>
+            </div>
+            <div class="header-center">
+                <h1 class="hud-title font-tech">J.A.R.V.I.S. INTERFACE</h1>
+            </div>
+            <div class="header-right">
+                <div class="telemetry">
+                    <span class="telemetry-item font-tech">LOC: HOSTNAME</span>
+                    <span class="telemetry-item font-tech" id="current-time">00:00:00 UTC</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Tab Controls -->
+        <nav class="hud-tabs">
+            <button class="tab-btn active font-tech" data-tab="hud-tab" onclick="switchTab('hud-tab')">HUD_MAIN</button>
+            <button class="tab-btn font-tech" data-tab="settings-tab" onclick="switchTab('settings-tab')">HUD_SETTINGS</button>
+            <button class="tab-btn font-tech" data-tab="history-tab" onclick="switchTab('history-tab')">HUD_HISTORY</button>
+        </nav>
+
+        <!-- Main Content Area -->
+        <main class="hud-main-content">
+            
+            <!-- Tab 1: HUD Main (Arc Reactor) -->
+            <section id="hud-tab" class="tab-content active">
+                <div class="reactor-wrapper">
+                    <!-- Arc Reactor SVG -->
+                    <div class="reactor-container" id="reactor-container">
+                        <svg class="arc-reactor" viewBox="0 0 200 200" width="300" height="300">
+                            <!-- Glow Filter -->
+                            <defs>
+                                <filter id="glow-heavy" x="-50%" y="-50%" width="200%" height="200%">
+                                    <feGaussianBlur stdDeviation="6" result="blur1" />
+                                    <feGaussianBlur stdDeviation="3" result="blur2" />
+                                    <feMerge>
+                                        <feMergeNode in="blur1" />
+                                        <feMergeNode in="blur2" />
+                                        <feMergeNode in="SourceGraphic" />
+                                    </feMerge>
+                                </filter>
+                                <filter id="glow-light" x="-30%" y="-30%" width="160%" height="160%">
+                                    <feGaussianBlur stdDeviation="2" result="blur" />
+                                    <feMerge>
+                                        <feMergeNode in="blur" />
+                                        <feMergeNode in="SourceGraphic" />
+                                    </feMerge>
+                                </filter>
+                            </defs>
+
+                            <!-- Outer Tech Ring -->
+                            <circle class="reactor-ring outer-ring" cx="100" cy="100" r="90" />
+                            <circle class="reactor-ring outer-ring-dashed" cx="100" cy="100" r="85" />
+                            
+                            <!-- Middle Counter-Rotating Dash Ring -->
+                            <circle class="reactor-ring mid-ring-dashed" cx="100" cy="100" r="72" />
+                            <circle class="reactor-ring mid-ring-solid" cx="100" cy="100" r="66" />
+                            
+                            <!-- Concentric Nodes Ring (10 Circles) -->
+                            <g class="power-nodes">
+                                <circle cx="100" cy="48" r="4" />
+                                <circle cx="131" cy="58" r="4" />
+                                <circle cx="150" cy="84" r="4" />
+                                <circle cx="150" cy="116" r="4" />
+                                <circle cx="131" cy="142" r="4" />
+                                <circle cx="100" cy="152" r="4" />
+                                <circle cx="69" cy="142" r="4" />
+                                <circle cx="50" cy="116" r="4" />
+                                <circle cx="50" cy="84" r="4" />
+                                <circle cx="69" cy="58" r="4" />
+                            </g>
+
+                            <!-- Inner Core Ring -->
+                            <circle class="reactor-ring inner-ring-solid" cx="100" cy="100" r="38" />
+                            
+                            <!-- Core Triangular/Circular Geometry -->
+                            <path class="reactor-core-path" d="M 100 70 L 126 115 L 74 115 Z" />
+                            <circle class="reactor-core-center" cx="100" cy="100" r="16" />
+                        </svg>
+                    </div>
+                    
+                    <!-- Status Display -->
+                    <div class="status-readout">
+                        <div class="status-tag font-tech" id="status-title">STATUS: STANDBY</div>
+                        <div class="status-desc" id="status-message">Awaiting voice trigger 'Hey Jarvis'...</div>
+                    </div>
+
+                    <!-- Transcript Subtitle Box (Speaking state) -->
+                    <div class="transcript-box hidden" id="transcript-box">
+                        <div class="transcript-title font-tech">DECODING AUDIO OUT:</div>
+                        <p class="transcript-text" id="transcript-text"></p>
+                    </div>
+                </div>
+
+                <!-- Text Command Input Terminal -->
+                <div class="terminal-container">
+                    <div class="terminal-bar">
+                        <span class="terminal-dot"></span>
+                        <span class="terminal-dot"></span>
+                        <span class="terminal-dot"></span>
+                        <span class="terminal-title font-tech">SECURE_TERMINAL_INPUT v4.12</span>
+                    </div>
+                    <form id="terminal-form" onsubmit="sendCommand(event)">
+                        <span class="terminal-prompt font-tech">&gt;</span>
+                        <input type="text" id="terminal-input" placeholder="Initiate manual command query, sir..." autocomplete="off" />
+                        <button type="submit" class="terminal-btn font-tech">RUN</button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- Tab 2: Settings -->
+            <section id="settings-tab" class="tab-content">
+                <div class="settings-grid">
+                    <!-- Config Card -->
+                    <div class="glass-card">
+                        <h2 class="card-title font-tech">CORE CONFIGURATION</h2>
+                        <form id="settings-form" onsubmit="saveSettings(event)">
+                            <div class="form-group">
+                                <label for="config-ollama-model" class="font-tech">OLLAMA MODEL</label>
+                                <select id="config-ollama-model">
+                                    <option value="llama3.2:3b">llama3.2:3b (Recommended)</option>
+                                    <option value="qwen2.5:1.5b">qwen2.5:1.5b (Fast)</option>
+                                    <option value="mistral">mistral (Legacy)</option>
+                                </select>
+                                <span class="help-text">Local LLM model to handle dialogue and intent classification.</span>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="config-whisper-size" class="font-tech">WHISPER MODEL SIZE</label>
+                                <select id="config-whisper-size">
+                                    <option value="tiny">tiny (Fastest, low accuracy)</option>
+                                    <option value="base">base (Balanced, recommended)</option>
+                                    <option value="small">small (Accurate, slower)</option>
+                                    <option value="medium">medium (Very accurate, heavy)</option>
+                                    <option value="large-v3">large-v3 (Maximum accuracy, very slow)</option>
+                                </select>
+                                <span class="help-text">Whisper speech-to-text model size. Changes require restart.</span>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="config-tts-voice" class="font-tech">TTS VOICE (PIPER)</label>
+                                <select id="config-tts-voice">
+                                    <option value="en_US-lessac-medium">en_US-lessac-medium (Tony Stark's Jarvis style)</option>
+                                    <option value="en_US-joe-medium">en_US-joe-medium (Male deep voice)</option>
+                                    <option value="en_US-amy-medium">en_US-amy-medium (Female voice)</option>
+                                </select>
+                                <span class="help-text">Piper onnx model voice. Download will trigger automatically if missing.</span>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group half">
+                                    <label for="config-port" class="font-tech">WEBSOCKET PORT</label>
+                                    <input type="number" id="config-port" min="1024" max="65535" required />
+                                </div>
+                                <div class="form-group half">
+                                    <label for="config-limit" class="font-tech">HISTORY LIMIT</label>
+                                    <input type="number" id="config-limit" min="5" max="100" required />
+                                </div>
+                            </div>
+
+                            <div class="button-container">
+                                <button type="submit" class="submit-btn font-tech" id="save-settings-btn">APPLY_SETTINGS</button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <!-- System Telemetry/Info Card -->
+                    <div class="glass-card flex-col">
+                        <div>
+                            <h2 class="card-title font-tech">SYSTEM ENVIRONMENT</h2>
+                            <div class="sys-info-list">
+                                <div class="sys-info-item">
+                                    <span class="info-label font-tech">OS_PLATFORM:</span>
+                                    <span class="info-val" id="sys-platform">Windows 11</span>
+                                </div>
+                                <div class="sys-info-item">
+                                    <span class="info-label font-tech">LOCAL_PORT:</span>
+                                    <span class="info-val" id="sys-port">8765</span>
+                                </div>
+                                <div class="sys-info-item">
+                                    <span class="info-label font-tech">WEBSOCKET:</span>
+                                    <span class="info-val" id="sys-websocket-status">Checking...</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="action-card-footer">
+                            <div class="hud-pulse-tag font-tech">J.A.R.V.I.S. CORE v1.0.4 ONLINE</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Tab 3: History -->
+            <section id="history-tab" class="tab-content">
+                <div class="glass-card history-container">
+                    <div class="history-header">
+                        <h2 class="card-title font-tech">DIALOGUE_RECORDS</h2>
+                        <button class="clear-btn font-tech" onclick="refreshHistory()">REFRESH</button>
+                    </div>
+                    <div class="history-log" id="history-log">
+                        <!-- Chat logs will load dynamically here -->
+                        <div class="empty-history font-tech">NO_RECORDS_AVAILABLE</div>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+
+        <!-- Footer Grid Telemetry -->
+        <footer class="hud-footer">
+            <span class="footer-telemetry font-tech">CORE_TEMP: NOMINAL</span>
+            <span class="footer-telemetry font-tech">GRID_FREQ: 60.00 Hz</span>
+            <span class="footer-telemetry font-tech">POWER: GRID (100%)</span>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>J.A.R.V.I.S. HUD</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --arc-blue: #00D4FF;
+            --neon-green: #39ff14;
+            --warning-orange: #ff7300;
+            --bg-pure-black: #000000;
+            --panel-trans: rgba(0, 0, 0, 0.85);
+            --border-glow: rgba(0, 212, 255, 0.4);
+            --border-glow-dim: rgba(0, 212, 255, 0.15);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+        }
+
+        html, body {
+            background: transparent;
+            font-family: 'Rajdhani', sans-serif;
+            color: #e2f1ff;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+        }
+
+        /* Draggable HUD Window Frame */
+        .hud-window {
+            width: 480px;
+            height: 640px;
+            background: var(--bg-pure-black);
+            border: 2px solid var(--arc-blue);
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 0 15px var(--border-glow);
+            position: relative;
+            -webkit-app-region: drag; /* Window is draggable by default */
+        }
+
+        /* Sci-fi corner notches */
+        .hud-window::before, .hud-window::after {
+            content: '';
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            border: 2px solid var(--arc-blue);
+            pointer-events: none;
+        }
+        .hud-window::before {
+            top: -2px;
+            left: -2px;
+            border-right: none;
+            border-bottom: none;
+        }
+        .hud-window::after {
+            bottom: -2px;
+            right: -2px;
+            border-left: none;
+            border-top: none;
+        }
+
+        /* Interactive child elements are explicitly no-drag */
+        .no-drag {
+            -webkit-app-region: no-drag;
+        }
+
+        /* TOP BAR */
+        .top-bar {
+            height: 60px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 20px;
+            border-bottom: 2px solid var(--arc-blue);
+            background: rgba(0, 15, 30, 0.5);
+            -webkit-app-region: no-drag; /* Double click title to minimize */
+            cursor: pointer;
+        }
+
+        .title-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .title-logo {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: var(--arc-blue);
+            box-shadow: 0 0 8px var(--arc-blue);
+        }
+
+        .title-text {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: 0.2em;
+            color: #ffffff;
+            text-shadow: 0 0 8px var(--border-glow);
+        }
+
+        .clock-text {
+            font-size: 16px;
+            font-weight: 500;
+            letter-spacing: 0.1em;
+            color: var(--arc-blue);
+        }
+
+        /* STATUS RING AREA */
+        .status-ring-container {
+            height: 200px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            background: radial-gradient(circle, rgba(0, 212, 255, 0.03) 0%, transparent 70%);
+        }
+
+        .status-ring-svg {
+            transform-origin: center;
+            width: 150px;
+            height: 150px;
+            filter: drop-shadow(0 0 2px var(--border-glow));
+        }
+
+        .ring {
+            fill: none;
+            stroke: var(--arc-blue);
+            transition: all 0.3s ease;
+            transform-origin: 100px 100px;
+        }
+
+        /* Simulating glow via nested rings of decreasing opacity */
+        .ring.outer { stroke-width: 2px; opacity: 0.8; }
+        .ring.middle { stroke-width: 1.5px; opacity: 0.6; }
+        .ring.inner { stroke-width: 3px; opacity: 0.9; }
+
+        .ring.sub-outer { stroke-width: 0.75px; opacity: 0.25; stroke-dasharray: 2 12; }
+        .ring.sub-middle { stroke-width: 1px; opacity: 0.35; stroke-dasharray: 8 6; }
+        .ring.sub-inner { stroke-width: 0.5px; opacity: 0.2; stroke-dasharray: 4 24; }
+
+        /* Status Name label inside */
+        .status-center-text {
+            position: absolute;
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.15em;
+            color: #ffffff;
+            text-align: center;
+            pointer-events: none;
+            text-shadow: 0 0 6px var(--border-glow);
+            transition: color 0.3s ease;
+        }
+
+        /* AUDIO WAVEFORM */
+        .waveform-container {
+            height: 80px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            border-top: 1px dashed var(--border-glow-dim);
+            border-bottom: 1px dashed var(--border-glow-dim);
+            background: rgba(0, 5, 12, 0.4);
+            position: relative;
+        }
+
+        .waveform-canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* TRANSCRIPT AREA */
+        .transcript-container {
+            height: 236px;
+            padding: 15px 20px;
+            background: rgba(0, 0, 0, 0.95);
+            overflow-y: auto;
+            border-bottom: 2px solid var(--arc-blue);
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 13px;
+            color: #c8e5ff;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            -webkit-app-region: no-drag;
+        }
+
+        /* Custom Scrollbar for Transcript */
+        .transcript-container::-webkit-scrollbar {
+            width: 4px;
+        }
+        .transcript-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .transcript-container::-webkit-scrollbar-thumb {
+            background: var(--border-glow);
+            border-radius: 2px;
+        }
+
+        .chat-line {
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+
+        .chat-line .sender-sir {
+            color: #0055FF;
+            font-weight: bold;
+            margin-right: 6px;
+        }
+
+        .chat-line .sender-jarvis {
+            color: var(--arc-blue);
+            font-weight: bold;
+            margin-right: 6px;
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 13px;
+            background-color: var(--neon-green);
+            margin-left: 4px;
+            vertical-align: middle;
+            animation: blink 1s step-end infinite;
+            box-shadow: 0 0 6px var(--neon-green);
+        }
+
+        @keyframes blink {
+            from, to { opacity: 0; }
+            50% { opacity: 1; }
+        }
+
+        /* SYSTEM STATS BAR */
+        .stats-bar {
+            height: 60px;
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            padding: 0 10px;
+            background: rgba(0, 15, 30, 0.3);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            letter-spacing: 0.08em;
+        }
+
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+        }
+
+        .stat-label {
+            font-size: 9px;
+            color: #79a5cc;
+            text-transform: uppercase;
+        }
+
+        .stat-value {
+            color: var(--arc-blue);
+            font-size: 13px;
+            text-shadow: 0 0 4px var(--border-glow-dim);
+        }
+
+        /* --------------------------------------------------------------------- */
+        /* STATE STYLING ANIMATIONS */
+        /* --------------------------------------------------------------------- */
+
+        /* IDLE: pulse slowly */
+        .state-idle .status-ring-svg {
+            animation: pulseSlow 3s ease-in-out infinite;
+        }
+        @keyframes pulseSlow {
+            0%, 100% { transform: scale(0.98); }
+            50% { transform: scale(1.02); }
+        }
+
+        /* LISTENING: pulse fast, brighter green-blue */
+        .state-listening .status-ring-svg {
+            animation: pulseFast 0.5s ease-in-out infinite;
+        }
+        .state-listening .ring {
+            stroke: #00ffcc;
+            stroke-width: 2.5px;
+        }
+        .state-listening .status-center-text {
+            color: #00ffcc;
+            text-shadow: 0 0 8px rgba(0, 255, 204, 0.6);
+        }
+        @keyframes pulseFast {
+            0%, 100% { transform: scale(0.97); }
+            50% { transform: scale(1.03); }
+        }
+
+        /* THINKING: counter rotate continuously */
+        .state-thinking .ring.outer {
+            animation: rotateCW 4s linear infinite;
+        }
+        .state-thinking .ring.middle {
+            animation: rotateCCW 3s linear infinite;
+        }
+        .state-thinking .ring.inner {
+            animation: rotateCW 6s linear infinite;
+        }
+        .state-thinking .status-center-text {
+            color: var(--warning-orange);
+            text-shadow: 0 0 8px rgba(255, 115, 0, 0.6);
+        }
+        .state-thinking .ring {
+            stroke: var(--warning-orange);
+        }
+        @keyframes rotateCW {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        @keyframes rotateCCW {
+            from { transform: rotate(360deg); }
+            to { transform: rotate(0deg); }
+        }
+
+        /* SPEAKING: vibrate left-right */
+        .state-speaking .status-ring-svg {
+            animation: vibrate 0.12s linear infinite;
+        }
+        .state-speaking .status-center-text {
+            color: #c343ff;
+            text-shadow: 0 0 8px rgba(195, 67, 255, 0.6);
+        }
+        .state-speaking .ring {
+            stroke: #c343ff;
+        }
+        @keyframes vibrate {
+            0%, 100% { transform: translate(0, 0); }
+            25% { transform: translate(-2px, 0); }
+            50% { transform: translate(0, 1px); }
+            75% { transform: translate(2px, 0); }
+        }
+    </style>
+</head>
+<body class="state-idle" id="body-root">
+
+    <div class="hud-window" id="hud-window">
+        
+        <!-- TOP BAR -->
+        <header class="top-bar" id="top-bar">
+            <div class="title-container">
+                <span class="title-logo"></span>
+                <span class="title-text">J.A.R.V.I.S</span>
+            </div>
+            <div class="clock-text" id="clock-text">00:00:00</div>
+        </header>
+
+        <!-- STATUS RING -->
+        <section class="status-ring-container">
+            <svg class="status-ring-svg" viewBox="0 0 200 200">
+                <!-- Outer Ring Core -->
+                <circle class="ring outer" cx="100" cy="100" r="85" />
+                <circle class="ring sub-outer" cx="100" cy="100" r="80" />
+                
+                <!-- Middle Ring Core -->
+                <circle class="ring middle" cx="100" cy="100" r="70" />
+                <circle class="ring sub-middle" cx="100" cy="100" r="65" />
+                
+                <!-- Inner Ring Core -->
+                <circle class="ring inner" cx="100" cy="100" r="55" />
+                <circle class="ring sub-inner" cx="100" cy="100" r="50" />
+            </svg>
+            <div class="status-center-text" id="status-label">STANDBY</div>
+        </section>
+
+        <!-- AUDIO WAVEFORM -->
+        <section class="waveform-container">
+            <canvas class="waveform-canvas" id="waveform-canvas"></canvas>
+        </section>
+
+        <!-- TRANSCRIPT AREA -->
+        <section class="transcript-container no-drag" id="transcript-log">
+            <!-- Starting system log lines -->
+            <div class="chat-line">
+                <span class="sender-jarvis">JARVIS:</span>HUD overlay initialized. Standing by, sir.<span class="cursor"></span>
+            </div>
+        </section>
+
+        <!-- SYSTEM STATS BAR -->
+        <footer class="stats-bar">
+            <div class="stat-item">
+                <span class="stat-label">CPU_SYS</span>
+                <span class="stat-value" id="stat-cpu">--%</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">RAM_SYS</span>
+                <span class="stat-value" id="stat-ram">--%</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">CORE_MODEL</span>
+                <span class="stat-value" id="stat-model">--</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">HUD_UP</span>
+                <span class="stat-value" id="stat-uptime">00:00:00</span>
+            </div>
+        </footer>
+
+    </div>
+
+    <script>
+        let socket = null;
+        let reconnectTimer = null;
+        let currentState = 'idle';
+        let currentSpeakerText = "";
+        let audioCtx = null;
+        let analyser = null;
+        let micStream = null;
+
+        const clockEl = document.getElementById('clock-text');
+        const bodyRoot = document.getElementById('body-root');
+        const statusLabel = document.getElementById('status-label');
+        const transcriptLog = document.getElementById('transcript-log');
+        const canvas = document.getElementById('waveform-canvas');
+        const ctx = canvas.getContext('2d');
+
+        // WS Connection Configs
+        const WS_URL = 'ws://localhost:8765';
+
+        // 1. Right Click Context Menu Handler
+        document.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            // Call exposed IPC showContextMenu
+            if (window.api && window.api.showContextMenu) {
+                window.api.showContextMenu();
+            }
+        });
+
+        // 2. Double Click Minimize Title Bar
+        document.getElementById('top-bar').addEventListener('dblclick', () => {
+            if (window.api && window.api.minimizeToTray) {
+                window.api.minimizeToTray();
+            }
+        });
+
+        // 3. Simple Real-Time Clock
+        function startClock() {
+            function tick() {
+                const now = new Date();
+                const hrs = String(now.getHours()).padStart(2, '0');
+                const mins = String(now.getMinutes()).padStart(2, '0');
+                const secs = String(now.getSeconds()).padStart(2, '0');
+                clockEl.textContent = `${hrs}:${mins}:${secs}`;
+            }
+            tick();
+            setInterval(tick, 1000);
+        }
+        startClock();
+
+        // 4. Connect WebSocket to Python backend
+        function connectWS() {
+            console.log("HUD trying to connect to J.A.R.V.I.S backend at " + WS_URL);
+            
+            socket = new WebSocket(WS_URL);
+
+            socket.onopen = () => {
+                console.log("HUD connected to J.A.R.V.I.S.");
+                logSystemMessage("WebSocket connected. System online.");
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    // State change handling
+                    if (data.state) {
+                        setHUDState(data.state, data);
+                    }
+                } catch (err) {
+                    console.error("Error parsing WS message:", err);
+                }
+            };
+
+            socket.onclose = () => {
+                console.log("HUD connection closed. Retrying...");
+                setHUDState('idle');
+                clearTimeout(reconnectTimer);
+                reconnectTimer = setTimeout(connectWS, 3000);
+            };
+
+            socket.onerror = (err) => {
+                console.error("WebSocket error:", err);
+                socket.close();
+            };
+        }
+        connectWS();
+
+        // 5. State transitions & Typewriter Effect
+        let typewritingTimeout = null;
+
+        function setHUDState(state, data = null) {
+            currentState = state.toLowerCase();
+            bodyRoot.className = `state-${currentState}`;
+            statusLabel.textContent = currentState.toUpperCase();
+
+            // Clear any active typewriter timeouts
+            clearTimeout(typewritingTimeout);
+
+            if (currentState === 'listening') {
+                // Initialize microphone visualizer if not already done
+                if (!analyser) {
+                    initMicrophone();
+                }
+            } else if (currentState === 'thinking') {
+                if (data && data.user_text) {
+                    // Typewrite user transcribed text in Blue
+                    startTypewriter("sir", data.user_text);
+                }
+            } else if (currentState === 'speaking') {
+                if (data && data.text) {
+                    currentSpeakerText = data.text;
+                    // Typewrite assistant speech text in Cyan
+                    startTypewriter("jarvis", data.text);
+                }
+            }
+        }
+
+        // Expose typewriting helper
+        function startTypewriter(sender, text) {
+            // Remove current cursor from previous logs
+            const oldCursors = document.querySelectorAll('.cursor');
+            oldCursors.forEach(el => el.remove());
+
+            const line = document.createElement('div');
+            line.className = 'chat-line';
+
+            const tag = document.createElement('span');
+            tag.className = sender === 'sir' ? 'sender-sir' : 'sender-jarvis';
+            tag.textContent = sender === 'sir' ? 'SIR: ' : 'JARVIS: ';
+            line.appendChild(tag);
+
+            const contentSpan = document.createElement('span');
+            line.appendChild(contentSpan);
+
+            const cursor = document.createElement('span');
+            cursor.className = 'cursor';
+            line.appendChild(cursor);
+
+            transcriptLog.appendChild(line);
+            scrollTranscriptBottom();
+
+            // Split into words for fluid playback typing simulation
+            const words = text.split(' ');
+            let wIndex = 0;
+
+            // Compute speed: 120 words per minute ~ 500ms per word. Let's make it 250ms for snappy UI feel.
+            function typeNextWord() {
+                if (wIndex < words.length) {
+                    contentSpan.textContent += (wIndex === 0 ? '' : ' ') + words[wIndex];
+                    wIndex++;
+                    scrollTranscriptBottom();
+                    typewritingTimeout = setTimeout(typeNextWord, 250);
+                }
+            }
+            typeNextWord();
+        }
+
+        function logSystemMessage(msg) {
+            // Remove cursor
+            const oldCursors = document.querySelectorAll('.cursor');
+            oldCursors.forEach(el => el.remove());
+
+            const line = document.createElement('div');
+            line.className = 'chat-line';
+            
+            const tag = document.createElement('span');
+            tag.className = 'sender-jarvis';
+            tag.textContent = 'SYS_LOG: ';
+            
+            const content = document.createElement('span');
+            content.textContent = msg;
+
+            const cursor = document.createElement('span');
+            cursor.className = 'cursor';
+
+            line.appendChild(tag);
+            line.appendChild(content);
+            line.appendChild(cursor);
+            
+            transcriptLog.appendChild(line);
+            scrollTranscriptBottom();
+        }
+
+        function scrollTranscriptBottom() {
+            transcriptLog.scrollTop = transcriptLog.scrollHeight;
+        }
+
+        // 6. Microphone Visualizer setup
+        async function initMicrophone() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                micStream = stream;
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioCtx.createMediaStreamSource(stream);
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                console.log("Microphone visualizer hooked up.");
+            } catch (err) {
+                console.warn("Could not capture mic stream (permission denied or no device):", err);
+            }
+        }
+
+        // 7. Render 60fps Visualizer Waveform Canvas
+        function resizeCanvas() {
+            canvas.width = canvas.parentElement.clientWidth;
+            canvas.height = 80;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        function drawWaveform() {
+            requestAnimationFrame(drawWaveform);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            const w = canvas.width;
+            const h = canvas.height;
+
+            ctx.lineWidth = 2.5;
+            ctx.strokeStyle = varColorForState();
+            ctx.beginPath();
+
+            if (currentState === 'listening' && analyser) {
+                // Draw actual mic wave data
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                analyser.getByteTimeDomainData(dataArray);
+
+                const sliceWidth = w / bufferLength;
+                let x = 0;
+
+                for (let i = 0; i < bufferLength; i++) {
+                    const v = dataArray[i] / 128.0;
+                    const y = (v * h) / 2;
+                    if (i === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                    x += sliceWidth;
+                }
+            } else if (currentState === 'speaking') {
+                // Draw voice wave simulation
+                const t = Date.now() * 0.012;
+                ctx.moveTo(0, h / 2);
+                for (let x = 0; x < w; x++) {
+                    const progress = x / w;
+                    const envelope = Math.sin(progress * Math.PI); // fade edges
+                    const w1 = Math.sin(x * 0.06 + t) * 16;
+                    const w2 = Math.sin(x * 0.15 - t * 1.5) * 8;
+                    const w3 = Math.cos(x * 0.03 + t * 0.5) * 12;
+                    const y = h / 2 + (w1 + w2 + w3) * envelope;
+                    ctx.lineTo(x, y);
+                }
+            } else if (currentState === 'thinking') {
+                // Draw crunching data ripple
+                const t = Date.now() * 0.07;
+                ctx.moveTo(0, h / 2);
+                for (let x = 0; x < w; x++) {
+                    const ripple = Math.sin(x * 0.3 + t) * Math.cos(x * 0.4 - t) * 3;
+                    ctx.lineTo(x, h / 2 + ripple);
+                }
+            } else {
+                // Idle breathe line
+                const t = Date.now() * 0.003;
+                ctx.moveTo(0, h / 2);
+                for (let x = 0; x < w; x++) {
+                    const progress = x / w;
+                    const envelope = Math.sin(progress * Math.PI);
+                    const breathe = Math.sin(t) * 2;
+                    const microJitter = Math.sin(x * 0.1 + t * 6) * 0.5;
+                    ctx.lineTo(x, h / 2 + (breathe + microJitter) * envelope);
+                }
+            }
+
+            ctx.lineTo(w, h / 2);
+            ctx.stroke();
+        }
+        drawWaveform();
+
+        function varColorForState() {
+            switch(currentState) {
+                case 'listening': return '#00ffcc';
+                case 'thinking': return '#ff7300';
+                case 'speaking': return '#c343ff';
+                default: return '#00D4FF';
+            }
+        }
+
+        // 8. Bind Electron Telemetry updates
+        if (window.api) {
+            window.api.onTelemetryUpdate((data) => {
+                document.getElementById('stat-cpu').textContent = `${data.cpu}%`;
+                document.getElementById('stat-ram').textContent = `${data.ram}%`;
+                document.getElementById('stat-model').textContent = data.model.toUpperCase();
+                document.getElementById('stat-uptime').textContent = data.uptime;
+            });
+            
+            window.api.onAlwaysOnTopChanged((state) => {
+                console.log("Window always-on-top changed to: ", state);
+            });
+        }
+    </script>
+</body>
+</html>

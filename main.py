@@ -291,14 +291,14 @@ async def main():
                 
                 # Transcribe audio using Whisper
                 user_text = await asyncio.to_thread(stt.transcribe, wav_bytes)
-                if user_text.strip():
+                if user_text and user_text.strip():
                     await state_manager.set_state(JarvisState.THINKING, user_text)
             else:
                 # Triggered via HUD text: Transition state directly to THINKING
                 await state_manager.set_state(JarvisState.THINKING, user_text)
                 logger.info(f"Processing HUD text command: '{user_text}'")
             
-            if not user_text.strip():
+            if not user_text or not user_text.strip():
                 logger.info("Empty command. Returning to standby.")
                 continue
                 

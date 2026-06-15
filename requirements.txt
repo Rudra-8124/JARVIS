@@ -13,4 +13,8 @@ win10toast==0.9
 psutil==7.2.2
 chromadb
 apscheduler
-
+feedparser
+spotipy
+pymupdf
+dateparser
+webrtcvad-wheels

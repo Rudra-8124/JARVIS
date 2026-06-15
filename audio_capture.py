@@ -1,108 +1,125 @@
 import numpy as np
 import sounddevice as sd
-import scipy.io.wavfile as wavfile
-import io
-import time
+import webrtcvad
 import logging
 
 logger = logging.getLogger("jarvis")
 
 def calibrate_threshold(sample_rate=16000, duration=0.5):
     """
-    Measures ambient noise floor for `duration` seconds and calculates
-    a dynamic speech detection threshold (2.5x noise RMS, min floor of 0.015).
+    Legacy calibrator stub to maintain backward-compatibility with main.py calls.
+    Returns a default threshold value as VAD handles speech gating.
     """
-    logger.info("Calibrating microphone noise floor... Please remain silent.")
-    num_frames = int(sample_rate * duration)
-    try:
-        audio = sd.rec(num_frames, samplerate=sample_rate, channels=1, dtype='float32')
-        sd.wait()
-        rms = np.sqrt(np.mean(audio**2))
-        threshold = max(rms * 2.5, 0.015)
-        logger.info(f"Calibration complete. Noise floor RMS: {rms:.4f}, Threshold set to: {threshold:.4f}")
-        return threshold
-    except Exception as e:
-        logger.warning(f"Calibration failed: {e}. Falling back to default threshold 0.03")
-        return 0.03
+    logger.info("VAD engine active. Skipping noise-floor calibration.")
+    return 0.03
 
-def capture_audio(threshold=0.03, silence_duration=1.5, sample_rate=16000, trigger_listening_callback=None):
+def is_too_quiet(audio_chunk):
     """
-    Listens to the default microphone.
-    - Uses pre-rolling (keeps last 0.5s of audio) to avoid cutting off the start of speech.
-    - Transitions to LISTENING when volume exceeds threshold.
-    - Stops recording when silence (volume below threshold) is detected for `silence_duration` seconds.
-    - Returns in-memory WAV bytes (16kHz, mono, 16-bit PCM).
+    Returns True if the root-mean-square (RMS) energy of the float32 audio
+    chunk is below 0.001, filtering out empty background noise.
     """
-    chunk_size = 1024
-    pre_roll_duration = 0.5  # Maintain 0.5s pre-trigger history
-    pre_roll_chunks_limit = int((sample_rate * pre_roll_duration) / chunk_size)
+    rms = np.sqrt(np.mean(audio_chunk**2))
+    return rms < 0.001
+
+def capture_audio(threshold=0.03, silence_duration=1.2, sample_rate=16000, trigger_listening_callback=None):
+    """
+    Captures mono speech audio at 16000Hz using WebRTC VAD.
     
-    pre_roll_buffer = []
-    recorded_chunks = []
+    - VAD aggressiveness level: 3 (most aggressive filtering).
+    - Checks RMS energy to skip silent chunks entirely (energy < 0.001).
+    - Requires 3 consecutive 30ms speech frames to trigger recording.
+    - Automatically stops after 1.2 seconds of consecutive silence.
+    - Limits recording to a maximum of 15 seconds.
+    - Discards recordings shorter than 0.5 seconds as noise.
+    - Returns a numpy float32 array at 16kHz or None.
+    """
+    vad = webrtcvad.Vad(3)
+    
+    frame_duration_ms = 30
+    frame_samples = int(sample_rate * frame_duration_ms / 1000)  # 480 samples at 16kHz
+    
+    recorded_frames = []
     is_recording = False
-    silence_start_time = None
+    consecutive_speech = 0
+    consecutive_silence = 0
     
-    logger.info("Microphone is active. Listening for speech...")
+    # Pre-roll history buffer of 10 frames (300ms) to avoid clipping start of speech
+    pre_roll_limit = 10
+    pre_roll_buffer = []
+    
+    print(" Listening...", flush=True)
     
     try:
-        with sd.InputStream(samplerate=sample_rate, channels=1, dtype='float32') as stream:
+        with sd.InputStream(samplerate=sample_rate, channels=1, dtype='float32', blocksize=frame_samples) as stream:
             while True:
-                # Read a chunk of audio from the input stream
-                chunk, overflowed = stream.read(chunk_size)
+                # Read exactly one 30ms block
+                frame, overflowed = stream.read(frame_samples)
                 if overflowed:
                     logger.debug("Audio input stream overflowed.")
                 
-                audio_data = chunk.flatten()
-                rms = np.sqrt(np.mean(audio_data**2))
+                frame_data = frame.flatten()
+                
+                # Check RMS quietness
+                if is_too_quiet(frame_data):
+                    is_speech = False
+                else:
+                    # Convert float32 [-1.0, 1.0] to signed int16 PCM for WebRTC VAD
+                    frame_int16 = np.clip(frame_data * 32767.0, -32768.0, 32767.0).astype(np.int16)
+                    raw_bytes = frame_int16.tobytes()
+                    try:
+                        is_speech = vad.is_speech(raw_bytes, sample_rate)
+                    except Exception as e:
+                        logger.error(f"VAD classification error: {e}")
+                        is_speech = False
                 
                 if not is_recording:
-                    # Keep rolling pre-roll buffer
-                    pre_roll_buffer.append(audio_data)
-                    if len(pre_roll_buffer) > pre_roll_chunks_limit:
+                    # Rolling history buffer
+                    pre_roll_buffer.append(frame_data)
+                    if len(pre_roll_buffer) > pre_roll_limit:
                         pre_roll_buffer.pop(0)
                     
-                    # Trigger voice recording when signal exceeds threshold
-                    if rms > threshold:
-                        is_recording = True
-                        logger.info("Voice detected! Recording speech...")
-                        if trigger_listening_callback:
-                            trigger_listening_callback()
-                        
-                        # Build initial buffer from pre-roll
-                        recorded_chunks = list(pre_roll_buffer)
+                    if is_speech:
+                        consecutive_speech += 1
+                        if consecutive_speech >= 3:
+                            is_recording = True
+                            print(" Recording...", flush=True)
+                            if trigger_listening_callback:
+                                trigger_listening_callback()
+                            recorded_frames = list(pre_roll_buffer)
+                    else:
+                        consecutive_speech = 0
                 else:
-                    recorded_chunks.append(audio_data)
+                    recorded_frames.append(frame_data)
                     
-                    if rms < threshold:
-                        if silence_start_time is None:
-                            silence_start_time = time.time()
-                        elif time.time() - silence_start_time >= silence_duration:
-                            logger.info("Speech finished. Silence detected.")
+                    if not is_speech:
+                        consecutive_silence += 1
+                        silence_threshold_frames = int(silence_duration / (frame_duration_ms / 1000))
+                        if consecutive_silence >= silence_threshold_frames:
+                            logger.info("Silence duration exceeded threshold. Stopping capture.")
                             break
                     else:
-                        silence_start_time = None
+                        consecutive_silence = 0
+                    
+                    # Auto-stop after 15 seconds (15 / 0.03 = 500 frames)
+                    max_frames = int(15.0 / (frame_duration_ms / 1000))
+                    if len(recorded_frames) >= max_frames:
+                        logger.info("Maximum recording limit (15s) reached. Stopping capture.")
+                        break
                         
     except Exception as e:
         logger.error(f"Error reading from microphone: {e}")
         return None
-                    
-    if not recorded_chunks:
+        
+    if not recorded_frames:
         return None
         
-    full_audio = np.concatenate(recorded_chunks)
+    full_audio = np.concatenate(recorded_frames)
     duration = len(full_audio) / sample_rate
     
-    # Ignore false triggers (less than 0.5 seconds of total recording)
+    # Minimum duration check (0.5 seconds)
     if duration < 0.5:
-        logger.info("Speech duration too short, discarding recording.")
+        logger.info(f"Discarding short audio snippet ({duration:.2f}s).")
         return None
         
-    # Scale float32 [-1.0, 1.0] to signed int16 PCM [-32768, 32767]
-    audio_int16 = np.clip(full_audio * 32767.0, -32768.0, 32767.0).astype(np.int16)
-    
-    # Write WAV to in-memory buffer
-    wav_io = io.BytesIO()
-    wavfile.write(wav_io, sample_rate, audio_int16)
-    wav_io.seek(0)
-    
-    return wav_io.read()
+    logger.info(f"Successfully captured audio segment: {duration:.2f}s.")
+    return full_audio

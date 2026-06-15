@@ -1,4 +1,3 @@
-import io
 import logging
 from faster_whisper import WhisperModel
 
@@ -6,10 +5,14 @@ logger = logging.getLogger("jarvis")
 
 class SpeechToText:
     """
-    Speech-to-text transcription module using the faster-whisper engine.
+    Speech-to-text transcription module using the faster-whisper base.en engine.
     Runs on CPU with int8 quantization for high-speed, local inference.
     """
-    def __init__(self, model_size="base", device="cpu", compute_type="int8"):
+    def __init__(self, model_size="base.en", device="cpu", compute_type="int8"):
+        # Map generic 'base' size requests to 'base.en' for faster/more accurate English transcription
+        if model_size == "base":
+            model_size = "base.en"
+            
         self.model_size = model_size
         logger.info(f"Initializing Whisper model '{model_size}' on {device} with {compute_type}...")
         try:
@@ -19,27 +22,68 @@ class SpeechToText:
             logger.error(f"Failed to load Whisper model: {e}")
             raise e
 
-    def transcribe(self, wav_bytes):
+    def transcribe(self, audio_numpy):
         """
-        Transcribes the in-memory WAV bytes.
-        Returns the combined transcription string (empty if no speech is detected).
+        Transcribes a 1D float32 numpy array at 16kHz.
+        Applies confidence thresholds and filters out common Whisper hallucinations.
+        Returns the clean transcribed string or None.
         """
-        if not wav_bytes:
-            return ""
+        if audio_numpy is None or len(audio_numpy) == 0:
+            return None
             
         try:
-            # Load the raw audio bytes into an in-memory file-like object
-            audio_file = io.BytesIO(wav_bytes)
+            # Transcribe with specific arguments for higher accuracy and hallucination reduction
+            segments, info = self.model.transcribe(
+                audio_numpy,
+                beam_size=5,
+                best_of=5,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                no_speech_threshold=0.6,
+                compression_ratio_threshold=2.4,
+                language="en"
+            )
             
-            # Perform transcription (beam_size=5 is standard for good accuracy)
-            segments, info = self.model.transcribe(audio_file, beam_size=5, language="en")
+            segments = list(segments)
+            if not segments:
+                return None
+                
+            # Log transcription confidence metrics
+            first_segment = segments[0]
+            avg_logprob = first_segment.avg_logprob
+            logger.info(f"Whisper segment avg_logprob: {avg_logprob:.4f}")
+            print(f" Whisper confidence (avg_logprob): {avg_logprob:.4f}")
             
-            # Since segments is a generator, we iterate to execute the model and collect results
-            text_parts = [segment.text for segment in segments]
-            transcription = "".join(text_parts).strip()
+            # Discard low-confidence transcriptions (avg_logprob < -1.0)
+            if avg_logprob < -1.0:
+                logger.info(f"Transcription confidence below threshold ({avg_logprob:.4f} < -1.0). Discarding.")
+                return None
+                
+            text = " ".join(segment.text for segment in segments).strip()
+            if not text:
+                return None
+                
+            # Clean text and verify length/hallucinations
+            cleaned_phrase = text.lower().strip(" .,!?")
             
-            logger.info(f"Transcription result: '{transcription}'")
-            return transcription
+            # Common faster-whisper hallucinations list
+            hallucinations = [
+                "thank you", "thanks for watching", "you", ".", " ", 
+                "bye", "goodbye", "see you next time", "please subscribe"
+            ]
+            
+            if cleaned_phrase in hallucinations or not cleaned_phrase:
+                logger.info(f"Discarding common Whisper hallucination/filler: '{text}'")
+                return None
+                
+            if len(text.strip()) < 3:
+                logger.info(f"Discarding short noise fragment: '{text}'")
+                return None
+                
+            # Strip leading/trailing whitespace and punctuation
+            final_text = text.strip(" .,!?")
+            return final_text
+            
         except Exception as e:
             logger.error(f"Error during transcription: {e}")
-            return ""
+            return None

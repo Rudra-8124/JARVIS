@@ -113,6 +113,10 @@ async def main():
     # Callback functions to interact from threads to the main asyncio loop
     def on_wake_word():
         """Triggered in background thread when 'Hey Jarvis' is heard."""
+        try:
+            tts.stop_speaking()
+        except Exception:
+            pass
         loop.call_soon_threadsafe(wake_word_event.set)
 
     def on_toggle_mute(muted: bool):
@@ -263,6 +267,10 @@ async def main():
             
             # Deactivate wake word engine during processing
             wake_word_detector.set_active(False)
+            try:
+                tts.stop_speaking()
+            except Exception:
+                pass
             
             # If triggered via wake word, record and transcribe voice
             if not is_text_command:

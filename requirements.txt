@@ -18,3 +18,4 @@ spotipy
 pymupdf
 dateparser
 webrtcvad-wheels
+edge-tts

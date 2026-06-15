@@ -106,57 +106,13 @@ class AIBrain:
         self.fallback_index = (self.fallback_index + 1) % len(self.FALLBACK_MESSAGES)
         return msg
 
+    def check_ollama(self):
+        """Checks if Ollama is running and model is available."""
+        return check_ollama(self.ollama_url, self.model)
+
     def run_startup_check(self):
-        """
-        Performs a startup tags check. Speaks and prints diagnostic details
-        if Ollama is not running or the model is missing.
-        """
-        parsed_url = urllib.parse.urlparse(self.ollama_url)
-        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-        tags_url = f"{base_url}/api/tags"
-        
-        logger.info(f"Running Ollama startup check: {tags_url}")
-        try:
-            r = requests.get(tags_url, timeout=5)
-            r.raise_for_status()
-            data = r.json()
-            models = data.get("models", [])
-            model_names = [m.get("name", "") for m in models]
-            
-            target = self.model.lower()
-            found = False
-            for name in model_names:
-                if target == name.lower() or name.lower().startswith(target):
-                    found = True
-                    break
-                    
-            if not found:
-                available = ", ".join(model_names) if model_names else "None"
-                err_text = (
-                    f"[ERROR] Model '{self.model}' not found in Ollama.\n"
-                    f"Available models: {available}\n"
-                    f"Please run: ollama pull {self.model}"
-                )
-                print(f"\n{err_text}\n", flush=True)
-                logger.error(err_text)
-        except requests.exceptions.ConnectionError:
-            err_msg = "Sir, Ollama is not running. Please open a terminal and type ollama serve"
-            print(f"\n[ERROR] {err_msg}\n", flush=True)
-            logger.error(err_msg)
-            # Synchronously speak the alert using native Windows SpVoice
-            try:
-                import win32com.client
-                speaker = win32com.client.Dispatch("SAPI.SpVoice")
-                speaker.Speak(err_msg)
-            except Exception:
-                try:
-                    import subprocess
-                    cmd = f'powershell -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak(\'{err_msg}\')"'
-                    subprocess.run(cmd, shell=True, timeout=5)
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.error(f"Ollama startup tag validation failed: {e}")
+        """Performs a startup tags check using check_ollama."""
+        return self.check_ollama()
 
     def _stream_ollama(self, system_prompt, queue, loop):
         """
@@ -268,3 +224,149 @@ class AIBrain:
                 
         assistant_reply = "".join(full_response)
         self.add_assistant_message(assistant_reply)
+
+    def generate(self, user_text, mem_context=None):
+        """
+        Generates a non-streaming response from Ollama.
+        Commits assistant's response to history deque.
+        """
+        self.add_user_message(user_text)
+        
+        current_time = datetime.now().strftime("%B %d, %Y, %I:%M %p")
+        system_prompt = self.get_system_prompt().format(datetime=current_time)
+        if mem_context:
+            system_prompt += f"\n\n[Memory Context]\n{mem_context}"
+            
+        parsed_url = urllib.parse.urlparse(self.ollama_url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        generate_url = f"{base_url}/api/generate"
+        
+        # Build manual prompt structure
+        prompt = f"{system_prompt}\n\n"
+        for msg in self.history:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "user":
+                prompt += f"Human: {content}\n"
+            elif role == "assistant":
+                prompt += f"Assistant: {content}\n"
+        if not prompt.endswith("Assistant:"):
+            prompt += "Assistant:"
+            
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.85,
+                "top_p": 0.9,
+                "num_predict": 250,
+                "stop": ["Human:", "User:", "\nHuman", "\nUser"]
+            }
+        }
+        
+        try:
+            logger.info(f"Calling Ollama generate endpoint: {generate_url}")
+            response = requests.post(generate_url, json=payload, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            response_text = data.get("response", "").strip()
+            self.add_assistant_message(response_text)
+            return response_text
+        except Exception as e:
+            # Log full exception traceback to file
+            try:
+                err_file = os.path.join(self.history_dir, "errors.log")
+                with open(err_file, 'a', encoding='utf-8') as f:
+                    f.write(f"\n--- Error at {datetime.now()} ---\n")
+                    import traceback
+                    traceback.print_exc(file=f)
+            except Exception:
+                pass
+            logger.error(f"Error calling Ollama generate: {e}", exc_info=True)
+            fallback_msg = self.get_fallback_message()
+            self.add_assistant_message(fallback_msg)
+            return fallback_msg
+
+def check_ollama(url=None, model=None):
+    """
+    Checks if Ollama is running and the model is available.
+    Can load url/model from config if not specified.
+    """
+    import urllib.parse
+    import requests
+    import os
+    import json
+    import logging
+    
+    logger = logging.getLogger("jarvis")
+    
+    if url is None or model is None:
+        try:
+            user_dir = os.path.join(os.path.expanduser("~"), ".jarvis")
+            config_path = os.path.join(user_dir, "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    if url is None:
+                        url = config.get("ollama_url", "http://localhost:11434/api/generate")
+                    if model is None:
+                        model = config.get("ollama_model", "llama3.2:3b")
+        except Exception:
+            pass
+            
+    if url is None:
+        url = "http://localhost:11434/api/generate"
+    if model is None:
+        model = "llama3.2:3b"
+        
+    parsed_url = urllib.parse.urlparse(url)
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    tags_url = f"{base_url}/api/tags"
+    
+    logger.info(f"Checking Ollama tags check: {tags_url}")
+    try:
+        r = requests.get(tags_url, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        models = data.get("models", [])
+        model_names = [m.get("name", "") for m in models]
+        
+        target = model.lower()
+        found = False
+        for name in model_names:
+            if target == name.lower() or name.lower().startswith(target):
+                found = True
+                break
+                
+        if not found:
+            available = ", ".join(model_names) if model_names else "None"
+            err_text = (
+                f"[ERROR] Model '{model}' not found in Ollama.\n"
+                f"Available models: {available}\n"
+                f"Please run: ollama pull {model}"
+            )
+            print(f"\n{err_text}\n", flush=True)
+            logger.error(err_text)
+            return False
+        return True
+    except requests.exceptions.ConnectionError:
+        err_msg = "Sir, Ollama is not running. Please open a terminal and type ollama serve"
+        print(f"\n[ERROR] {err_msg}\n", flush=True)
+        logger.error(err_msg)
+        try:
+            import win32com.client
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            speaker.Speak(err_msg)
+        except Exception:
+            try:
+                import subprocess
+                cmd = f'powershell -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak(\'{err_msg}\')"'
+                subprocess.run(cmd, shell=True, timeout=5)
+            except Exception:
+                pass
+        return False
+    except Exception as e:
+        logger.error(f"Ollama startup check failed: {e}")
+        return False
+

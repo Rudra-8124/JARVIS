@@ -1,64 +1,41 @@
 import os
+import sys
 import json
 import asyncio
 import logging
-import sys
+import threading
+import time
 import uuid
+from datetime import datetime
+
+# Local module imports
 from state_manager import StateManager, JarvisState
 from config import load_config, setup_logging, HISTORY_PATH
-from audio_capture import calibrate_threshold, capture_audio
+from audio_capture import capture_speech
 from stt import SpeechToText
-from ai_brain import AIBrain
+from ai_brain import AIBrain, check_ollama
 from tts import TextToSpeech
 from wake_word import WakeWordDetector
 from tray import SystemTrayManager
-from skills import route_intent
+import skills
 from memory_manager import MemoryManager
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Initialize the global logging configuration
+# Global state manager and tts for callbacks/helper access
+state_manager = None
+tts_instance = None
+ai_brain_instance = None
+
 logger = setup_logging()
 
-class SentenceBuffer:
-    """
-    Accumulates character/word tokens from the AI stream and yields completed sentences
-    based on standard punctuation markers. This minimizes voice output latency.
-    """
-    def __init__(self):
-        self.buffer = ""
-        self.endings = {'.', '?', '!'}
-
-    def add_chunk(self, chunk):
-        """Adds a chunk of text to the buffer and returns a list of completed sentences."""
-        self.buffer += chunk
-        sentences = []
-        start_idx = 0
-        i = 0
-        while i < len(self.buffer):
-            char = self.buffer[i]
-            # Sentence boundary detection
-            if char in self.endings:
-                # Ensure it is followed by space/newline or is the end of the text
-                if (i + 1 == len(self.buffer)) or (self.buffer[i + 1] in (' ', '\n')):
-                    sentence = self.buffer[start_idx:i+1].strip()
-                    if sentence:
-                        sentences.append(sentence)
-                    start_idx = i + 1
-            elif char == '\n':
-                sentence = self.buffer[start_idx:i].strip()
-                if sentence:
-                    sentences.append(sentence)
-                start_idx = i + 1
-            i += 1
-            
-        self.buffer = self.buffer[start_idx:]
-        return sentences
-
-    def flush(self):
-        """Flushes the remaining content from the buffer as the final sentence."""
-        remainder = self.buffer.strip()
-        self.buffer = ""
-        return remainder if remainder else None
+JARVIS_LOGO = """
+      ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
+      ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
+      ██║███████║██████╔╝██║   ██║██║███████╗
+ ██   ██║██╔══██║██╔══██║╚██╗ ██╔╝██║╚════██║
+ ╚█████╔╝██║  ██║██║  ██║  ╚████╔╝ ██║███████║
+  ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝   ╚═══╝  ╚═╝╚══════╝
+       - Just A Rather Very Intelligent System -
+"""
 
 def load_last_session(ai_brain):
     """Loads the last session's conversation history if it exists."""
@@ -81,343 +58,334 @@ def save_last_session(ai_brain):
     except Exception as e:
         logger.error(f"Error saving conversation history: {e}")
 
+def broadcast_ws(payload):
+    """Broadcasts a payload to all connected clients on the ws_loop thread."""
+    global state_manager
+    if not state_manager:
+        return
+    ws_loop = getattr(state_manager, "ws_loop", None)
+    if not ws_loop or not ws_loop.is_running():
+        return
+        
+    async def do_send():
+        if state_manager and state_manager._clients:
+            message = json.dumps(payload)
+            disconnected = set()
+            for client in list(state_manager._clients):
+                try:
+                    await client.send(message)
+                except Exception:
+                    disconnected.add(client)
+            if disconnected:
+                state_manager._clients.difference_update(disconnected)
+                
+    asyncio.run_coroutine_threadsafe(do_send(), ws_loop)
+
+def run_ws_server(state_manager, port, ws_loop):
+    """Runs the websocket server inside a background thread's loop."""
+    async def server_task():
+        server = await state_manager.start_server()
+        await server.wait_closed()
+        
+    def target():
+        asyncio.set_event_loop(ws_loop)
+        ws_loop.run_until_complete(server_task())
+        
+    t = threading.Thread(target=target, name="WebSocketServerThread", daemon=True)
+    t.start()
+    return t
+
+async def run_orchestrator(stt, tts, wake_word, state_manager, ai_brain, keyboard_queue, memory_manager, session_id):
+    """
+    Core orchestrator task managing the asyncio concurrent loops:
+    - Task 1: Wake word listener
+    - Task 2: Keyboard commands consumer
+    - Task 3: HUD WebSocket commands consumer
+    """
+    
+    async def execute_and_speak(text):
+        if not text or not text.strip():
+            return
+            
+        # Extract user facts and save to long-term memory
+        try:
+            memory_manager.extract_and_save_facts(text)
+        except Exception as e:
+            logger.error(f"Error extracting facts: {e}")
+
+        # Build memory context from SQLite + ChromaDB
+        try:
+            mem_context = memory_manager.build_memory_context(text)
+        except Exception as e:
+            logger.error(f"Error building memory context: {e}")
+            mem_context = None
+            
+        broadcast_ws({"state": "thinking", "user_text": text})
+        print(f"You: {text}")
+        
+        # Check for skill commands first (fast, local)
+        skill_response = skills.route(text)
+        if skill_response:
+            response = skill_response
+        else:
+            # AI brain (slower)
+            state_manager.set("THINKING")
+            response = ai_brain.generate(text, mem_context=mem_context)
+            
+        # Speak response
+        state_manager.set("SPEAKING")
+        broadcast_ws({"state": "speaking", "text": response})
+        print(f"JARVIS: {response}")
+        tts.speak(response)  # non-blocking, runs in thread
+        
+        # Save to memory
+        try:
+            memory_manager.save_conversation(text, response, session_id)
+        except Exception as e:
+            logger.error(f"Error saving conversation to long-term memory: {e}")
+            
+        # Wait for speech to finish
+        while tts.is_speaking():
+            await asyncio.sleep(0.1)
+            
+        state_manager.set("IDLE")
+        broadcast_ws({"state": "idle"})
+        
+    async def process_command(audio):
+        state_manager.set("LISTENING")
+        text = stt.transcribe(audio)
+        if text is None:
+            tts.speak("I didn't catch that, sir.")
+            state_manager.set("IDLE")
+            broadcast_ws({"state": "idle"})
+            return
+            
+        await execute_and_speak(text)
+
+    # Task 1 - Wake word listener
+    async def wake_word_listener_loop():
+        while True:
+            # Run the blocking openwakeword listen in a worker thread
+            detected = await asyncio.to_thread(wake_word.listen)
+            if detected:
+                # Interrupt: if wake word detected while JARVIS is speaking, stop speech immediately
+                if tts.is_speaking():
+                    tts.stop_speaking()
+                    
+                state_manager.set("LISTENING")
+                broadcast_ws({"state": "listening"})
+                
+                # Capture VAD-gated speech in a thread
+                audio = await asyncio.to_thread(capture_speech)
+                if audio is None or len(audio) < 8000:  # too short, ignore
+                    state_manager.set("IDLE")
+                    broadcast_ws({"state": "idle"})
+                    continue
+                    
+                await process_command(audio)
+                
+    wake_word_task = asyncio.create_task(wake_word_listener_loop())
+    
+    # Task 2 - Keyboard commands consumer
+    async def keyboard_consumer_loop():
+        while True:
+            text = await keyboard_queue.get()
+            if text:
+                if tts.is_speaking():
+                    tts.stop_speaking()
+                await execute_and_speak(text)
+                
+    keyboard_consumer_task = asyncio.create_task(keyboard_consumer_loop())
+    
+    # Task 3 - HUD WebSocket commands consumer
+    async def hud_consumer_loop():
+        while True:
+            text = await state_manager.get_next_command()
+            if text:
+                if tts.is_speaking():
+                    tts.stop_speaking()
+                await execute_and_speak(text)
+                
+    hud_consumer_task = asyncio.create_task(hud_consumer_loop())
+    
+    # Run all tasks concurrently
+    try:
+        await asyncio.gather(
+            wake_word_task,
+            keyboard_consumer_task,
+            hud_consumer_task
+        )
+    finally:
+        wake_word_task.cancel()
+        keyboard_consumer_task.cancel()
+        hud_consumer_task.cancel()
+
+async def shutdown_sequence(tray_manager, wake_word, tts, ai_brain):
+    """Graceful shutdown sequence."""
+    print("\nShutting down, sir. Goodbye.", flush=True)
+    try:
+        # Play a local shutdown announcement
+        import win32com.client
+        speaker = win32com.client.Dispatch("SAPI.SpVoice")
+        speaker.Speak("Shutting down, sir. Goodbye.")
+    except Exception:
+        try:
+            import subprocess
+            cmd = 'powershell -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak(\'Shutting down, sir. Goodbye.\')"'
+            subprocess.run(cmd, shell=True, timeout=5)
+        except Exception:
+            pass
+            
+    try:
+        if ai_brain:
+            save_last_session(ai_brain)
+    except Exception as e:
+        logger.error(f"Error saving session on exit: {e}")
+        
+    try:
+        if tray_manager:
+            tray_manager.stop()
+    except Exception:
+        pass
+    try:
+        if wake_word:
+            wake_word.stop()
+    except Exception:
+        pass
+    try:
+        if tts:
+            tts.stop()
+    except Exception:
+        pass
+        
+    logger.info("J.A.R.V.I.S. cleanly shut down.")
+    sys.exit(0)
+
 async def main():
-    logger.info("Starting J.A.R.V.I.S. assistant with wake-word and system tray icon...")
+    global state_manager, tts_instance, ai_brain_instance
     
-    # Cache the primary task so it can be cancelled from the tray thread on Quit
-    main_task = asyncio.current_task()
+    # 1. Print ASCII art JARVIS logo to terminal
+    print(JARVIS_LOGO, flush=True)
     
-    # 1. Load configuration file
+    # 2. Check Ollama is running
+    print("Checking Ollama availability...", flush=True)
+    # Perform startup check. Speech output is handled inside check_ollama on error.
+    check_ollama()
+    
+    # 3. Load config from C:/Users/{user}/.jarvis/config.json
+    print("Loading config...", flush=True)
     config = load_config()
-    websocket_port = config.get("websocket_port", 8765)
-    whisper_model_size = config.get("whisper_model_size", "base")
-    # Updated default model value to llama3.2:3b
-    ollama_model = config.get("ollama_model", "llama3.2:3b")
-    tts_voice = config.get("tts_voice", "en_US-lessac-medium")
-    history_limit = config.get("conversation_history_limit", 20)
     
-    # Get active event loop to share with background threads
+    # 4. Initialize all modules: STT, TTS, wake word, state manager
+    print("Initializing J.A.R.V.I.S. core modules...", flush=True)
+    state_manager = StateManager(port=config.get("websocket_port", 8765))
+    
+    whisper_model_size = config.get("whisper_model_size", "base")
+    stt = SpeechToText(model_size=whisper_model_size)
+    
+    ollama_model = config.get("ollama_model", "llama3.2:3b")
+    ai_brain = AIBrain(model=ollama_model, history_limit=config.get("conversation_history_limit", 20))
+    ai_brain_instance = ai_brain
+    load_last_session(ai_brain)
+    
     loop = asyncio.get_running_loop()
+    tts = TextToSpeech(state_manager, loop, voice_name=config.get("tts_voice", "en-GB-RyanNeural"))
+    tts_instance = tts
+    
+    wake_word = WakeWordDetector(callback=None, score_threshold=0.5)
     
     # Initialize Memory Manager and Session ID
     session_id = str(uuid.uuid4())
     memory_manager = MemoryManager(ollama_url=f"http://localhost:11434/api/generate", embed_model="nomic-embed-text")
     
-    # 2. Initialize state manager
-    state_manager = StateManager(port=websocket_port)
+    # 5. Speak startup message
+    startup_msg = "J.A.R.V.I.S. online. All systems nominal, sir."
+    print(startup_msg, flush=True)
+    tts.speak(startup_msg)
     
-    # Mute and tracking variables
-    is_muted = False
-    wake_word_event = asyncio.Event()
-
-    # Callback functions to interact from threads to the main asyncio loop
-    def on_wake_word():
-        """Triggered in background thread when 'Hey Jarvis' is heard."""
-        try:
-            tts.stop_speaking()
-        except Exception:
-            pass
-        loop.call_soon_threadsafe(wake_word_event.set)
-
+    # 6. Start WebSocket server on port 8765 in background thread
+    print("Starting background WebSocket server thread...", flush=True)
+    ws_loop = asyncio.new_event_loop()
+    state_manager.ws_loop = ws_loop
+    ws_thread = run_ws_server(state_manager, config.get("websocket_port", 8765), ws_loop)
+    
+    # 7. Start system tray icon in background thread
+    print("Starting background System Tray thread...", flush=True)
     def on_toggle_mute(muted: bool):
-        """Triggered from tray thread when mute state changes."""
-        nonlocal is_muted
-        is_muted = muted
-        if is_muted:
-            logger.info("J.A.R.V.I.S. is MUTED.")
-            wake_word_detector.set_active(False)
-            loop.call_soon_threadsafe(wake_word_event.clear)
-        else:
-            logger.info("J.A.R.V.I.S. is UNMUTED.")
-            wake_word_detector.set_active(True)
-
-    def on_tray_quit():
-        """Triggered from tray thread when Quit is selected."""
-        logger.info("Quit selected from tray. Triggering main loop shutdown...")
-        loop.call_soon_threadsafe(main_task.cancel)
-
-    # 3. Initialize background services
-    # Initialize STT (Speech-To-Text)
-    try:
-        stt = SpeechToText(model_size=whisper_model_size)
-    except Exception as e:
-        logger.error(f"Failed to initialize Speech-to-Text: {e}")
-        return
+        logger.info(f"System Tray: mute toggled to {muted}")
         
-    # Initialize AI Brain
-    # Note: ai_brain.py will resolve the endpoint dynamically to /api/generate
-    ai_brain = AIBrain(model=ollama_model, history_limit=history_limit)
-    load_last_session(ai_brain)
-    
-    # Initialize TTS (Text-To-Speech)
-    try:
-        tts = TextToSpeech(state_manager, loop, voice_name=tts_voice)
-    except Exception as e:
-        logger.error(f"Failed to initialize Text-to-Speech: {e}")
-        return
-
-    # Initialize Wake Word Detector
-    try:
-        wake_word_detector = WakeWordDetector(callback=on_wake_word, score_threshold=0.5)
-        wake_word_detector.start()
-    except Exception as e:
-        logger.error(f"Failed to initialize Wake Word Detector: {e}")
-        return
-
-    # Initialize and Start System Tray Icon
+    def on_tray_quit():
+        logger.info("System Tray: Quit command selected.")
+        asyncio.run_coroutine_threadsafe(
+            shutdown_sequence(tray_manager, wake_word, tts, ai_brain),
+            loop
+        )
+        
     tray_manager = SystemTrayManager(
-        on_toggle_mute_callback=on_toggle_mute, 
+        on_toggle_mute_callback=on_toggle_mute,
         on_quit_callback=on_tray_quit
     )
     tray_manager.start()
-
-    # Schedule daily morning briefing
-    async def run_morning_briefing():
-        logger.info("Executing scheduled morning briefing...")
-        briefing = memory_manager.morning_briefing()
-        logger.info(f"Morning Briefing: {briefing}")
-        tts.speak(briefing)
-
-    scheduler = AsyncIOScheduler()
-    briefing_time = config.get("briefing_time", "08:00")
-    try:
-        hour, minute = map(int, briefing_time.split(":"))
-        scheduler.add_job(run_morning_briefing, 'cron', hour=hour, minute=minute)
-        scheduler.start()
-        logger.info(f"Morning briefing scheduled daily at {briefing_time}")
-    except Exception as e:
-        logger.error(f"Failed to schedule morning briefing: {e}")
-
-    # 4. Start the WebSocket server
-    ws_server = await state_manager.start_server()
     
-    # 5. Calibrate microphone threshold
-    # Run in a separate thread so it doesn't block the asyncio loop
-    threshold = await asyncio.to_thread(calibrate_threshold)
-    logger.info(f"Calibrated threshold: {threshold:.4f}")
-    
-    # Helper callback function to change state to listening from capture thread
-    def trigger_listening():
-        asyncio.run_coroutine_threadsafe(state_manager.set_state(JarvisState.LISTENING), loop)
-
-    logger.info("J.A.R.V.I.S. is online, wake word active.")
-    
-    try:
+    # Keyboard queue and task initialized once to prevent thread leak on crash recovery
+    keyboard_queue = asyncio.Queue()
+    async def keyboard_listener_task():
         while True:
-            # Load config dynamically at the start of each iteration to capture updates
-            config = load_config()
-            
-            # Hot-reload Ollama model
-            ai_brain.model = config.get("ollama_model", "llama3.2:3b")
-            
-            # Hot-reload TTS voice
-            new_tts_voice = config.get("tts_voice", "en_US-lessac-medium")
-            if new_tts_voice != tts.voice_name:
-                logger.info(f"TTS voice changed from {tts.voice_name} to {new_tts_voice}. Reloading TTS engine...")
-                tts.stop()
-                try:
-                    tts = TextToSpeech(state_manager, loop, voice_name=new_tts_voice)
-                except Exception as e:
-                    logger.error(f"Failed to reload Text-to-Speech: {e}")
-                    
-            # Hot-reload Whisper size
-            new_whisper_size = config.get("whisper_model_size", "base")
-            if new_whisper_size != stt.model_size:
-                logger.info(f"Whisper model size changed from {stt.model_size} to {new_whisper_size}. Reloading STT engine...")
-                try:
-                    stt = SpeechToText(model_size=new_whisper_size)
-                except Exception as e:
-                    logger.error(f"Failed to reload Speech-to-Text: {e}")
-
-            # Set state to IDLE
-            await state_manager.set_state(JarvisState.IDLE)
-            
-            wake_word_event.clear()
-            is_text_command = False
-            user_text = ""
-            
-            if is_muted:
-                wake_word_detector.set_active(False)
-                logger.info("Standing by (MUTED)... Awaiting commands from HUD.")
-                # Wait only for text commands from the HUD since mic is muted
-                user_text = await state_manager.get_next_command()
-                is_text_command = True
-            else:
-                wake_word_detector.set_active(True)
-                logger.info("Standing by... Say 'Hey Jarvis' or send a command via HUD to activate.")
+            text = await asyncio.to_thread(input, "")
+            if text.strip():
+                await keyboard_queue.put(text.strip())
                 
-                # Wait for either wake word OR text command from HUD
-                wake_word_task = asyncio.create_task(wake_word_event.wait())
-                hud_command_task = asyncio.create_task(state_manager.get_next_command())
-                
-                done, pending = await asyncio.wait(
-                    [wake_word_task, hud_command_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # Cancel the other task
-                for task in pending:
-                    task.cancel()
-                    
-                if hud_command_task in done:
-                    user_text = hud_command_task.result()
-                    is_text_command = True
-                else:
-                    is_text_command = False
-            
-            # Deactivate wake word engine during processing
-            wake_word_detector.set_active(False)
-            try:
-                tts.stop_speaking()
-            except Exception:
-                pass
-            
-            # If triggered via wake word, record and transcribe voice
-            if not is_text_command:
-                # Skip speech pipeline if the user muted while waiting
-                if is_muted:
-                    continue
-                    
-                # Transition state to LISTENING
-                await state_manager.set_state(JarvisState.LISTENING)
-                
-                # Start recording speech command (runs in background thread until silence detected)
-                wav_bytes = await asyncio.to_thread(
-                    capture_audio, 
-                    threshold=threshold, 
-                    silence_duration=1.5, 
-                    sample_rate=16000, 
-                    trigger_listening_callback=trigger_listening
-                )
-                
-                if not wav_bytes:
-                    logger.info("No speech command captured.")
-                    continue
-                    
-                # Set state to THINKING
-                await state_manager.set_state(JarvisState.THINKING)
-                
-                # Transcribe audio using Whisper
-                user_text = await asyncio.to_thread(stt.transcribe, wav_bytes)
-                if user_text and user_text.strip():
-                    await state_manager.set_state(JarvisState.THINKING, user_text)
-            else:
-                # Triggered via HUD text: Transition state directly to THINKING
-                await state_manager.set_state(JarvisState.THINKING, user_text)
-                logger.info(f"Processing HUD text command: '{user_text}'")
-            
-            if not user_text or not user_text.strip():
-                logger.info("Empty command. Returning to standby.")
-                continue
-                
-            logger.info(f"User command: {user_text}")
-
-            # Extract user facts from text query
-            try:
-                memory_manager.extract_and_save_facts(user_text)
-            except Exception as e:
-                logger.error(f"Error extracting facts: {e}")
-
-            # Build memory context from SQLite + ChromaDB
-            try:
-                mem_context = memory_manager.build_memory_context(user_text)
-            except Exception as e:
-                logger.error(f"Error building memory context: {e}")
-                mem_context = None
-            
-            # 1. Try to route the intent to a local skill
-            try:
-                func, params = route_intent(user_text, model=ai_brain.model)
-            except Exception as e:
-                logger.error(f"Error routing intent: {e}")
-                func, params = None, None
-                
-            if func:
-                logger.info(f"Executing skill: {func.__name__} with parameters: {params}")
-                try:
-                    response_text = func(**params)
-                    tts.speak(response_text)
-                    await asyncio.to_thread(tts.speak_queue.join)
-                    
-                    # Add to conversation history so context is preserved
-                    ai_brain.add_user_message(user_text)
-                    ai_brain.add_assistant_message(response_text)
-
-                    # Save to long-term memory
-                    try:
-                        memory_manager.save_conversation(user_text, response_text, session_id)
-                    except Exception as e:
-                        logger.error(f"Error saving conversation to long-term memory: {e}")
-                except Exception as e:
-                    logger.error(f"Error executing skill {func.__name__}: {e}")
-                    tts.speak("I encountered an error executing that request, sir.")
-                    await asyncio.to_thread(tts.speak_queue.join)
-            else:
-                # 2. Fallback to Ollama conversational response
-                try:
-                    sentence_buf = SentenceBuffer()
-                    assistant_response = []
-                    async for chunk in ai_brain.generate_response_stream(user_text, mem_context=mem_context):
-                        assistant_response.append(chunk)
-                        sentences = sentence_buf.add_chunk(chunk)
-                        for sentence in sentences:
-                            tts.speak(sentence)
-                            
-                    # Flush final sentence
-                    remainder = sentence_buf.flush()
-                    if remainder:
-                        tts.speak(remainder)
-                        
-                    # Wait until speech synthesis queue is fully empty and played back
-                    await asyncio.to_thread(tts.speak_queue.join)
-                    
-                    # Save to long-term memory
-                    try:
-                        assistant_reply = "".join(assistant_response)
-                        memory_manager.save_conversation(user_text, assistant_reply, session_id)
-                    except Exception as e:
-                        logger.error(f"Error saving conversation to long-term memory: {e}")
-                    
-                except Exception as e:
-                    logger.error(f"Error during dialogue handling: {e}")
-                    tts.speak(str(e))
-                    await asyncio.to_thread(tts.speak_queue.join)
-                
-    except asyncio.CancelledError:
-        logger.info("Main orchestrator task cancelled. Initiating cleanup...")
-    finally:
-        # Graceful shutdown process
-        logger.info("Stopping all J.A.R.V.I.S. services...")
-        
-        # Stop scheduled jobs
+    asyncio.create_task(keyboard_listener_task())
+    
+    # 8. Enter main loop
+    print("All systems fully operational. Standing by.", flush=True)
+    while True:
         try:
-            scheduler.shutdown(wait=False)
-            logger.info("Scheduler stopped.")
+            await run_orchestrator(
+                stt=stt,
+                tts=tts,
+                wake_word=wake_word,
+                state_manager=state_manager,
+                ai_brain=ai_brain,
+                keyboard_queue=keyboard_queue,
+                memory_manager=memory_manager,
+                session_id=session_id
+            )
+        except asyncio.CancelledError:
+            logger.info("Orchestrator loop cancelled.")
+            break
         except Exception as e:
-            logger.error(f"Failed to stop scheduler: {e}")
+            logger.error(f"Crash recovery caught exception in main loop: {e}", exc_info=True)
+            print(f"\n[CRASH] J.A.R.V.I.S. encountered a localized system fault: {e}")
+            print("Auto-restarting orchestrator array in 2 seconds...\n", flush=True)
+            await asyncio.sleep(2)
             
-        # Stop wake word detector thread
-        wake_word_detector.stop()
-        
-        # Stop tray icon
-        tray_manager.stop()
-        
-        # Stop TTS worker thread
-        tts.stop()
-        
-        # Close WebSocket server
-        ws_server.close()
-        await ws_server.wait_closed()
-        logger.info("WebSocket server closed.")
-        
-        # Save session history
-        save_last_session(ai_brain)
-        logger.info("J.A.R.V.I.S. has shut down.")
+    # Exit gracefully if the infinite loop ends
+    await shutdown_sequence(tray_manager, wake_word, tts, ai_brain)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        # Catch Ctrl+C at the root level for clean termination on Windows
-        logger.info("Ctrl+C detected. Exiting application...")
+        # Catch KeyboardInterrupt at root level (Ctrl+C in terminal)
+        print("\nCtrl+C detected in main terminal.", flush=True)
+        # We can't await inside sync context, so run synchronous cleanup
+        print("Shutting down, sir. Goodbye.", flush=True)
+        try:
+            import win32com.client
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            speaker.Speak("Shutting down, sir. Goodbye.")
+        except Exception:
+            try:
+                import subprocess
+                cmd = 'powershell -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak(\'Shutting down, sir. Goodbye.\')"'
+                subprocess.run(cmd, shell=True, timeout=5)
+            except Exception:
+                pass
+                
+        if ai_brain_instance:
+            try:
+                save_last_session(ai_brain_instance)
+            except Exception:
+                pass
         sys.exit(0)

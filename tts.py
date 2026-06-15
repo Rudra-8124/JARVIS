@@ -99,6 +99,10 @@ class TextToSpeech:
         self.worker_thread = threading.Thread(target=self._tts_worker, daemon=True)
         self.worker_thread.start()
 
+    def is_speaking(self):
+        """Returns True if the TTS engine is currently playing audio."""
+        return self.speaking_state
+
     def speak(self, text):
         """Public non-blocking interface to queue speech commands."""
         cleaned_text = text.strip()

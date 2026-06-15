@@ -47,6 +47,57 @@ class WakeWordDetector:
         self.last_detection_time = 0
         self._lock = threading.Lock()
 
+    def listen(self):
+        """
+        Blocks until the 'Hey Jarvis' wake word is detected.
+        Returns True once detected.
+        """
+        chunk_size = self.chunk_size
+        sample_rate = self.sample_rate
+        
+        try:
+            stream = sd.InputStream(
+                samplerate=sample_rate,
+                channels=1,
+                dtype='int16',
+                blocksize=chunk_size
+            )
+            stream.start()
+        except Exception as e:
+            logger.error(f"Failed to open microphone for wake word detection: {e}")
+            time.sleep(1.0)
+            return False
+
+        logger.info("Wake word detector (listen mode) is online. Awaiting wake word...")
+        
+        try:
+            while True:
+                chunk, overflowed = stream.read(chunk_size)
+                if overflowed:
+                    logger.debug("Wake word microphone input overflowed.")
+
+                audio_data = chunk.flatten()
+                prediction = self.model.predict(audio_data)
+                score = prediction.get("hey_jarvis", 0.0)
+
+                if score > self.score_threshold:
+                    now = time.time()
+                    if now - self.last_detection_time > 3.0:
+                        self.last_detection_time = now
+                        logger.info(f"Wake word 'Hey Jarvis' detected via listen()! Score: {score:.3f}")
+                        self._play_chime()
+                        return True
+                time.sleep(0.01)
+        except Exception as e:
+            logger.error(f"Error in wake word detection loop: {e}")
+            return False
+        finally:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+
     def start(self):
         """Starts the background listening thread."""
         with self._lock:

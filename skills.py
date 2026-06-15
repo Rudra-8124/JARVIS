@@ -1140,3 +1140,18 @@ def route_intent(text, model="llama3.2:3b", url="http://localhost:11434/api/gene
             
     logger.info("No matching skill found. Treating as standard dialog.")
     return None, None
+
+def route(text):
+    """
+    Routes intent and executes the matched skill, returning its response string.
+    Returns None if no skill matches the intent.
+    """
+    func, params = route_intent(text)
+    if func:
+        try:
+            return func(**params)
+        except Exception as e:
+            logger.error(f"Error executing skill {func.__name__}: {e}")
+            return "I encountered an error executing that request, sir."
+    return None
+

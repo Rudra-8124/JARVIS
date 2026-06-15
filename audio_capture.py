@@ -123,3 +123,8 @@ def capture_audio(threshold=0.03, silence_duration=1.2, sample_rate=16000, trigg
         
     logger.info(f"Successfully captured audio segment: {duration:.2f}s.")
     return full_audio
+
+def capture_speech():
+    """VAD-based speech capture wrapper."""
+    return capture_audio()
+

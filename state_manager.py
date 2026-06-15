@@ -33,6 +33,23 @@ class StateManager:
         """Submits a command text to the queue (thread-safe/async-safe)."""
         self.command_queue.put_nowait(text)
 
+    def set(self, state_str: str, text: str = ""):
+        """Synchronously sets the state and triggers a WebSocket broadcast on ws_loop."""
+        mapping = {
+            "IDLE": JarvisState.IDLE,
+            "LISTENING": JarvisState.LISTENING,
+            "THINKING": JarvisState.THINKING,
+            "SPEAKING": JarvisState.SPEAKING
+        }
+        state_enum = mapping.get(state_str.upper(), JarvisState.IDLE)
+        self._state = state_enum
+        self._speaking_text = text if state_enum in (JarvisState.SPEAKING, JarvisState.THINKING) else ""
+        logger.info(f"State changed to: {self._state.value}" + (f" - '{text}'" if text else ""))
+        
+        ws_loop = getattr(self, "ws_loop", None)
+        if ws_loop and ws_loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._broadcast_state(), ws_loop)
+
     def get_state(self):
         """
         Getter function to access the current state name (string)
@@ -54,7 +71,16 @@ class StateManager:
             self._speaking_text = text if state in (JarvisState.SPEAKING, JarvisState.THINKING) else ""
             logger.info(f"State changed to: {self._state.value}" + (f" - '{text}'" if text else ""))
         
-        await self._broadcast_state()
+        ws_loop = getattr(self, "ws_loop", None)
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+            
+        if ws_loop and current_loop != ws_loop:
+            asyncio.run_coroutine_threadsafe(self._broadcast_state(), ws_loop)
+        else:
+            await self._broadcast_state()
 
     async def _broadcast_state(self):
         """Helper to broadcast the current state as JSON to all connected clients."""

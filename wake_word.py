@@ -33,7 +33,6 @@ class WakeWordDetector:
             self.model = Model(
                 wakeword_models=["hey_jarvis"],
                 enable_speex_noise_suppression=False,  # Speex is not supported on Windows
-                vad_threshold=0.5,                     # Enable built-in Silero VAD gating
                 inference_framework="onnx"
             )
             logger.info("openWakeWord model loaded successfully.")
@@ -55,6 +54,14 @@ class WakeWordDetector:
         chunk_size = self.chunk_size
         sample_rate = self.sample_rate
         
+        try:
+            device_info = sd.query_devices(None, 'input')
+            device_name = device_info.get('name', 'Unknown')
+            logger.info(f"Wake word input device: {device_name}")
+            print(f"Using mic input: {device_name}", flush=True)
+        except Exception as e:
+            logger.warning(f"Could not query input device: {e}")
+
         try:
             stream = sd.InputStream(
                 samplerate=sample_rate,
@@ -79,6 +86,11 @@ class WakeWordDetector:
                 audio_data = chunk.flatten()
                 prediction = self.model.predict(audio_data)
                 score = prediction.get("hey_jarvis", 0.0)
+
+                # Real-time score diagnostic printing to help user debug microphone input
+                if score > 0.15:
+                    logger.debug(f"Wake word score: {score:.3f}")
+                    print(f" (Wake word score: {score:.3f})", flush=True)
 
                 if score > self.score_threshold:
                     now = time.time()
